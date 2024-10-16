@@ -3,11 +3,13 @@ package snorlax
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"golang.org/x/net/context/ctxhttp"
@@ -31,8 +33,13 @@ type Config struct {
 	/* timout in secod default is application/json */
 	ContentType string
 	/* map your header */
-	Header    map[string]string
-	withProxy string
+	Header map[string]string
+
+	/* with proxy url */
+	WithProxy string
+
+	/* ignore ssl certification? */
+	WithForceSSL bool
 
 	/* timout in secod default is 25 second */
 	Timeout time.Duration
@@ -48,36 +55,38 @@ type Response struct {
 }
 
 type Fetch struct {
+	/* show error all */
 	Error       error
 	finalBody   *bytes.Reader
 	finalHeader http.Header
 	finalRes    Response
 	resBodyByte []byte
+	transport   *http.Transport
 }
 
 func (o *Fetch) defaultConfig(c Config) {
 	if c.Method == "" {
-		c.Method = "GET"
+		c.Method = get
 	}
 
 	var b []byte
 
-	if c.Method == "GET" || c.Method == "DELETE" {
+	if c.Method == get || c.Method == del {
 		b = nil
 	}
 
-	if c.Method == "POST" || c.Method == "UPDATE" || c.Method == "PUT" || c.Method == "PATCH" {
+	if c.Method == post || c.Method == put || c.Method == patch {
 		b, _ = json.Marshal(c.Body)
 	}
 
 	o.finalBody = bytes.NewReader(b)
 
 	if c.ContentType == "" {
-		c.ContentType = "application/json"
+		c.ContentType = appjson
 	}
 
 	o.finalHeader = http.Header{
-		"Content-Type": []string{c.ContentType},
+		contype: []string{c.ContentType},
 	}
 
 	for key, val := range c.Header {
@@ -86,6 +95,18 @@ func (o *Fetch) defaultConfig(c Config) {
 
 	if c.Timeout == 0 {
 		c.Timeout = 25
+	}
+
+	var proxyUrl *url.URL
+	if c.WithProxy != "" {
+		proxyUrl, o.Error = url.Parse(c.WithProxy)
+		o.transport.Proxy = http.ProxyURL(proxyUrl)
+	}
+
+	if c.WithForceSSL {
+		defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
+		defaultTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: c.WithForceSSL}
+		o.transport = defaultTransport
 	}
 
 }
@@ -105,7 +126,7 @@ func (o *Fetch) Fetch(ctx context.Context, c Config) *Fetch {
 		req.Header.Add(k, v)
 	}
 
-	client := &http.Client{Timeout: c.Timeout * time.Second}
+	client := &http.Client{Timeout: c.Timeout * time.Second, Transport: o.transport}
 	// tracingClient := apmhttp.WrapClient(client)
 
 	res, o.Error = ctxhttp.Do(ctx, client, req)
