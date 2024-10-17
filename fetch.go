@@ -57,16 +57,34 @@ type Response struct {
 type Fetch struct {
 	/* show error all */
 	Error       error
+	ErrorDebug  error
 	finalBody   *bytes.Reader
 	finalHeader http.Header
 	finalRes    Response
 	resBodyByte []byte
 	transport   *http.Transport
+	finalUri    *url.URL
+	finalMethod string
+	finalTo     time.Duration
+	req         *http.Request
+	res         *http.Response
 }
 
-func (o *Fetch) defaultConfig(c Config) {
+func (o *Fetch) defaultConfig(c Config) (err error) {
+
+	o.finalUri, err = url.ParseRequestURI(c.Uri)
+	if err != nil {
+		err = fmt.Errorf("error parse uri : %s", err.Error())
+		return
+	}
+
+	if o.finalUri.Hostname() == "" {
+		err = fmt.Errorf("error parse uri : no host detected")
+		return
+	}
+
 	if c.Method == "" {
-		c.Method = get
+		o.finalMethod = get
 	}
 
 	var b []byte
@@ -94,13 +112,10 @@ func (o *Fetch) defaultConfig(c Config) {
 	}
 
 	if c.Timeout == 0 {
-		c.Timeout = 25
-	}
+		o.finalTo = 25000 * time.Millisecond
+	} else {
+		o.finalTo = c.Timeout * time.Millisecond
 
-	var proxyUrl *url.URL
-	if c.WithProxy != "" {
-		proxyUrl, o.Error = url.Parse(c.WithProxy)
-		o.transport.Proxy = http.ProxyURL(proxyUrl)
 	}
 
 	if c.WithForceSSL {
@@ -109,47 +124,61 @@ func (o *Fetch) defaultConfig(c Config) {
 		o.transport = defaultTransport
 	}
 
+	var proxyUrl *url.URL
+	if c.WithProxy != "" {
+		proxyUrl, err = url.Parse(c.WithProxy)
+		if err != nil {
+			return
+		}
+		o.transport.Proxy = http.ProxyURL(proxyUrl)
+	}
+
+	return
+
 }
 
 func (o *Fetch) Fetch(ctx context.Context, c Config) *Fetch {
-	o.defaultConfig(c)
 
-	var req *http.Request
-	var res *http.Response
-
-	req, o.Error = http.NewRequestWithContext(nil, c.Method, c.Uri, o.finalBody)
+	o.Error = o.defaultConfig(c)
 	if o.Error != nil {
+		o.ErrorDebug = o.Error
 		return o
 	}
 
-	for k, v := range c.Header {
-		req.Header.Add(k, v)
+	o.req, o.Error = http.NewRequestWithContext(ctx, o.finalMethod, o.finalUri.String(), o.finalBody)
+	if o.Error != nil {
+		o.Error = fmt.Errorf("snorlax: request")
+		o.ErrorDebug = o.Error
+		return o
 	}
 
-	client := &http.Client{Timeout: c.Timeout * time.Second, Transport: o.transport}
-	// tracingClient := apmhttp.WrapClient(client)
+	o.req.Header = o.finalHeader
 
-	res, o.Error = ctxhttp.Do(ctx, client, req)
+	client := &http.Client{Timeout: o.finalTo, Transport: o.transport}
 
+	o.res, o.Error = ctxhttp.Do(ctx, client, o.req)
 	ne, ok := o.Error.(net.Error)
 	if ok && ne.Timeout() {
-		o.Error = fmt.Errorf("error timeout to call party | %s", o.Error.Error())
+		o.Error = fmt.Errorf("snorlax: timeout")
+		o.ErrorDebug = o.Error
 		return o
 	}
+	if o.Error != nil {
+		o.Error = fmt.Errorf("snorlax: get request")
+		o.ErrorDebug = o.Error
+		return o
+	}
+
+	defer o.res.Body.Close()
+
+	o.finalRes.Header = o.res.Header
+
+	o.resBodyByte, o.Error = io.ReadAll(o.res.Body)
 	if o.Error != nil {
 		return o
 	}
 
-	defer res.Body.Close()
-
-	o.finalRes.Header = res.Header
-
-	o.resBodyByte, o.Error = io.ReadAll(res.Body)
-	if o.Error != nil {
-		return o
-	}
-
-	o.finalRes.Code = res.StatusCode
+	o.finalRes.Code = o.res.StatusCode
 
 	return o
 
